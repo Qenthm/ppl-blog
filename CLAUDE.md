@@ -1,6 +1,16 @@
 # ppl-blog
 
-Personal engineering blog for PPL coursework. Built with Hugo + PaperMod theme, deployed on Vercel.
+Personal engineering blog for PPL (Software Engineering Lab) individual review. Built with Hugo + PaperMod theme, deployed on Vercel.
+
+## Purpose & audience
+
+Posts here serve as evidence for PPL individual review competences (M1–M6 mandatory + electives E1–E5). Each post should be credible to a **professional software engineer** reading it — meaning:
+
+- Assume the reader knows what a database, a test suite, a CI pipeline, and a deployment are. Don't explain basics.
+- Go deep on the technical specifics: exact tool versions, actual code snippets, real numbers (benchmark results, query times, line counts), real error messages.
+- The post should give a professional programmer something useful or interesting — a technique, a mental model, a lesson from a real failure — not just a summary of what was done.
+- Skip motivational framing ("this is important because…"). Get to the technical substance fast.
+- Write in first person as an engineer who did the work and has opinions about it.
 
 ## Stack
 
