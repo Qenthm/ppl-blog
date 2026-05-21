@@ -5,27 +5,15 @@ draft: false
 tags: ['solid', 'python', 'clean-architecture', 'software-engineering', 'fastapi']
 ---
 
-Robert C. Martin's SOLID principles aren't hard to recite. Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion — five slots, each with a one-sentence definition that fits on a flashcard. What's harder is recognizing them in code that already works, naming them precisely, and making the case that applying them mattered.
+Most SOLID explainers give you five definitions and move on. The part they skip is showing up in a codebase that already works, finding where each principle is being violated, and making the case that fixing it actually changed anything.
 
-This is a field report from a single sprint on a FastAPI service cluster. I'll cover all five, each tied to a specific commit, with Martin's definitions from *Clean Architecture* as the anchor. Not everything landed at the same quality level. I'll tell you where it did and where it didn't.
+One sprint last month on a FastAPI invoice-reminder service cluster: five code smells, five named fixes, each grounded in Martin's actual formulation from *Clean Architecture* — not the flashcard summaries that circulate online. The precise wording matters. In several cases it's what makes the violation visible in the first place.
 
-## What Martin actually says
-
-I want to start with the book's formulations because the one-sentence summaries that circulate online are often simplified to the point of being wrong.
-
-On **SRP**, Martin writes in *Clean Architecture*: *"A module should be responsible to one, and only one, actor."* The actor framing is the part that usually gets dropped. Two responsibilities don't violate SRP because they're different in kind — they violate SRP because they're owned by different stakeholders who might request changes independently.
-
-On **OCP**, the principle says a software artifact should be open for extension but closed for modification. The operative question isn't "can I add things?" but "does adding a new thing require changing what already exists?"
-
-On **LSP**, Martin describes it as substitutability: the parts of a system must adhere to a contract that allows them to be replaced with conforming alternatives without breaking the programs that use them. A subtype that silently changes what the caller expects is violating LSP even if it compiles.
-
-On **ISP**, Martin's formulation in *Clean Architecture* is blunt: depending on something that carries baggage you don't need can cause you troubles you didn't expect. An interface that forces implementors to provide methods no one will call is fragile at both ends.
-
-On **DIP**: *"The most flexible systems are those in which source code dependencies refer only to abstractions, not to concretions."* High-level modules (policy) shouldn't import low-level modules (mechanism) directly. Both should depend on an abstraction in between.
-
-Those are the definitions I'm working from.
+Not everything landed at the same quality level. I'll tell you where it did and where it didn't.
 
 ## SRP: ClientService had two actors
+
+Martin's formulation: *"A module should be responsible to one, and only one, actor."* The actor framing is the part that usually gets dropped. Two responsibilities don't violate SRP because they're different in kind — they violate it because they're owned by different stakeholders who request changes independently.
 
 `ClientService` was 354 lines when I picked up the sprint. Nothing was broken — tests passed, CI was green, the feature was shipping. The smell was subtler: every time I touched anything PII-related, I'd Ctrl+F the file to find every `encrypt()` call, because I didn't trust myself to remember all three locations. That reflex is the tell.
 
@@ -56,6 +44,8 @@ A side effect I didn't plan for: extracting the crypto to its own class made the
 The SRP diagnosis — two actors, one file — isn't just structural cleanliness. It's the reason improving the error handling felt like a natural next step once the class existed.
 
 ## OCP + ISP + LSP: the RiskScoringStrategy Protocol
+
+Three definitions that matter here. **OCP**: a software artifact should be open for extension but closed for modification — the operative question is whether adding a new thing requires changing what already exists. **ISP**: depending on something that carries baggage you don't need can cause you troubles you didn't expect. **LSP**: subtypes must honor the contract of the types they replace; a subtype that silently changes what the caller expects is violating LSP even if it compiles.
 
 `RiskScoringService` runs a deterministic weighted formula today. The roadmap has an ML scoring model. The classic OCP trap is designing the abstraction before you know the extension's shape — you write an abstract base class that turns out to have the wrong interface when the real use case arrives.
 
@@ -97,6 +87,8 @@ What's honest to say about LSP here: the guarantee is real, but it hasn't been e
 The three principles in one place is the creative part I want to flag. In inheritance-based languages, OCP, ISP, and LSP are often addressed with separate machinery — abstract base classes for OCP, separate interface types for ISP, explicit override rules for LSP. Python's structural typing via `Protocol` collapses all three into one declaration. The protocol is narrow enough for ISP, checkable enough for LSP, and the injection point in the constructor handles OCP.
 
 ## DIP: ReminderService's hidden dependency
+
+Martin: *"The most flexible systems are those in which source code dependencies refer only to abstractions, not to concretions."* High-level modules (policy) shouldn't import low-level modules (mechanism) directly.
 
 `ReminderService._send_telegram` had a deferred import inside the method body:
 
