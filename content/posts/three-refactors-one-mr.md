@@ -2,7 +2,7 @@
 title: 'Three Refactors I Shipped in One MR'
 date: 2026-05-21
 draft: false
-tags: ['refactoring', 'python', 'design-patterns', 'software-engineering', 'solid']
+tags: ['refactoring', 'python', 'design-patterns', 'software-engineering']
 ---
 
 There's a specific kind of file you learn to dread. Not broken — tests pass, CI is green, customers are using it. But you avoid it anyway. You touch it only when you have to, and when you do, you spend the first few minutes re-orienting: which method calls what, what side effects lurk where, whether there's another spot you'll forget to update.
@@ -13,13 +13,13 @@ So I opened a branch and decided to fix three things in one MR. Each fix is a na
 
 The service is part of an invoice-reminder SaaS. There's a class that manages clients, a class that sends reminders, and a background job that does the daily chasing. The patterns I hit are generic enough that you've probably got the same ones somewhere.
 
-## Case 1 — Single Responsibility Principle + Extract Class
+## Case 1 — Facade pattern (via Extract Class)
 
-**The pattern: Single Responsibility Principle (SRP).** From the SOLID principles: a class should have one, and only one, reason to change. "Reason to change" means a source of requirements that could force a rewrite. If two different stakeholders can independently demand changes to the same class, that class has more than one responsibility.
+**The smell: Single Responsibility Principle violation.** SRP is a design *principle*, not a pattern — it diagnoses the problem, not the solution. The principle says a class should have one reason to change. `ClientService` had at least two: product requirements (client validation, bulk import logic) and security requirements (encryption algorithm, key handling). Those come from different stakeholders and change independently.
 
-`ClientService` violated this. It was holding two unrelated responsibilities: the *business* of clients (create, validate, bulk import) and the *cryptography* of clients (encrypting and decrypting email, phone, and Telegram ID). Changing client validation logic and swapping encryption algorithms are completely different kinds of work — one comes from product requirements, the other from the security team — and both meant editing the same 354-line file.
+**The refactoring move: Extract Class.** One of Fowler's core refactoring catalog entries — when a class is doing the work of two, find the cluster of data and methods that belong together and pull them into their own class.
 
-**The refactoring move: Extract Class.** Take the responsibility that doesn't belong and lift it into its own class. This is one of Fowler's core refactoring catalog entries: when a class is doing the work of two, find the cluster of fields and methods that belong together and move them to a new class.
+**The design pattern that emerges: Facade.** Once you extract the crypto logic into `PIIEncryptor`, what you get is a Facade — a class that presents a clean, domain-specific interface over a lower-level subsystem. The raw `encrypt(value, key)` and `decrypt(value, key)` primitives are the subsystem. `PIIEncryptor.encrypt_field()` and `PIIEncryptor.decrypt_row()` are the facade: callers speak in terms of fields and rows, not raw bytes and cipher keys. The crypto library is an implementation detail that nothing outside `PIIEncryptor` needs to know about.
 
 Before, the crypto was sprinkled across three methods:
 
@@ -93,11 +93,11 @@ The old handlers also sat inside a class that nominally knows nothing about encr
 
 **Result.** The SRP violation meant that a future encryption algorithm change (say, AES-GCM → ChaCha20) would require hunting through 354 lines of `ClientService` across three methods. After the refactor, you touch `PIIEncryptor` only — 38 lines, one class, one reason to be there. `ClientService` doesn't change at all. The 42 existing tests stayed green; `PIIEncryptor` is now independently testable without standing up the whole client service.
 
-## Case 2 — Dependency Injection (Constructor Injection)
+## Case 2 — Dependency Injection pattern (replacing Service Locator)
 
-**The pattern: Dependency Injection.** A class should declare its dependencies explicitly, where callers can see them, rather than creating or fetching them internally. The most common form is constructor injection: pass the dependency in through `__init__`, where it's visible in the signature, instead of letting the class reach out and build it on demand.
+**The anti-pattern: Service Locator.** A class that reaches out and constructs (or fetches) its own dependencies internally is using the Service Locator anti-pattern. It works at runtime, but it hides what the class actually needs from anything that reads the code statically.
 
-The inverse — a class that creates or locates its own dependencies internally — is sometimes called the Service Locator anti-pattern. It works, but it hides what the class actually needs.
+**The design pattern: Dependency Injection — Constructor Injection variant.** Pass dependencies into the class through `__init__` rather than letting the class build them itself. The dependency is now visible in the constructor signature: callers know exactly what's required, static analyzers can trace it, and tests can swap it without monkeypatching internals.
 
 `ReminderService` had this problem:
 
@@ -156,9 +156,9 @@ A class-method patch replaces the method on the class itself, not on a specific 
 
 Structural win: `ReminderService` now builds one `ClientService` for its lifetime. Any engineer reading `__init__` sees the full dependency list immediately.
 
-## Case 3 — Repository Pattern + Eager Loading (eliminating N+1)
+## Case 3 — Repository pattern (batch-fetch) eliminating N+1
 
-**The pattern: Repository Pattern.** The Repository pattern separates data access logic from business logic. The application layer asks for objects by ID or by query; the repository layer handles how to fetch them. One of the things the repository pattern enables — and that's easy to misuse — is batch fetching: asking for multiple objects in a single query instead of one per object.
+**The design pattern: Repository.** The Repository pattern abstracts data access behind a collection-like interface. Business logic asks for objects by ID or criteria; the repository decides how to fetch them. One thing the pattern explicitly enables is batch fetching — asking for a set of objects in one query instead of one per object. That's the capability that was sitting unused here.
 
 The daily reminder job wasn't using it:
 
@@ -241,11 +241,13 @@ Bundling also made the MR easier to review. A reviewer could see the whole pictu
 
 ## The move underneath all three
 
-| Case | Smell | Pattern applied | Principle |
+| Case | Smell | Refactoring move | Design pattern |
 |---|---|---|---|
-| `ClientService` | Two responsibilities in one class | Extract Class | Single Responsibility (SRP) |
-| `ReminderService` | Hidden dependency, deferred import | Constructor Injection | Dependency Injection (DI) |
-| Reminder job | N+1 queries in a loop | Eager Loading / Batch Fetch | Repository Pattern |
+| `ClientService` | SRP violation — two unrelated responsibilities | Extract Class | Facade |
+| `ReminderService` | Service Locator anti-pattern — hidden dependency | Constructor Injection | Dependency Injection |
+| Reminder job | N+1 queries — per-item fetches in a loop | Batch fetch | Repository (batch-fetch capability) |
+
+SRP is a design *principle* that diagnosed Case 1; Facade is the *pattern* that emerged from the fix. Same distinction applies elsewhere — principles tell you something is wrong, patterns tell you what to build instead.
 
 Each one followed the same workflow: name the smell, apply the named pattern, verify with tests. The naming isn't pedantry — once a smell has a name, it has a known fix. You stop staring at the code and go look up the move.
 
