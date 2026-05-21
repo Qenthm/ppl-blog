@@ -7,7 +7,7 @@ paginate = 5
 [params]
   author = 'Rifqi'
   description = 'Engineering notes and write-ups'
-  defaultTheme = 'auto'
+  defaultTheme = 'light'
   ShowReadingTime = true
   ShowWordCount = true
   ShowPostNavLinks = true
