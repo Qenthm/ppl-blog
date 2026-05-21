@@ -1,0 +1,30 @@
+baseURL = 'https://ppl-blog.vercel.app/'
+locale = 'en-us'
+title = 'ppl-blog'
+theme = 'PaperMod'
+paginate = 5
+
+[params]
+  author = 'Rifqi'
+  description = 'Engineering notes and write-ups'
+  defaultTheme = 'auto'
+  ShowReadingTime = true
+  ShowWordCount = true
+  ShowPostNavLinks = true
+  ShowBreadCrumbs = true
+  ShowCodeCopyButtons = true
+  ShowShareButtons = false
+
+[menu]
+  [[menu.main]]
+    name = 'Posts'
+    url = '/posts/'
+    weight = 1
+  [[menu.main]]
+    name = 'Tags'
+    url = '/tags/'
+    weight = 2
+  [[menu.main]]
+    name = 'About'
+    url = '/about/'
+    weight = 3
