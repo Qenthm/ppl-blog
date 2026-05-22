@@ -11,6 +11,8 @@ I hit that moment twice on the same feature while building SIRA, a FastAPI-based
 
 ## What Red-Green-Refactor Actually Looks Like
 
+![The TDD loop: Write Failing Test → Implement Minimum Code → Clean Up → repeat](/images/tdd/01-rgr-cycle.png)
+
 The risk scoring feature was the first place I applied TDD strictly. The feature computes a weighted score from five client payment behavior metrics, then classifies the result as LOW, MEDIUM, or HIGH risk. Simple enough on paper.
 
 I wrote the tests first. The docstring on `test_risk_scoring.py` literally reads "written FIRST (TDD Red phase)" — I left it there deliberately because I wanted to be honest about the sequence in code review.
@@ -24,6 +26,8 @@ score = delay_score × 0.35
       + payment_consistency_score × 0.15
       + invoice_age_score × 0.10
 ```
+
+![Pie chart showing risk score weights: Delay 35%, Overdue Count 20%, Outstanding Amount 20%, Payment Consistency 15%, Invoice Age 10%](/images/tdd/02-weights-pie.png)
 
 Writing a test that just passes in a sample input and checks the output would have been fast. But that test wouldn't catch an implementation that got the weights slightly wrong. A delay weight of `0.34` instead of `0.35` would pass a "typical" test case — the score would be slightly off, but you'd need a careful eye to notice.
 
@@ -67,6 +71,8 @@ This kind of test design — isolating each weight, testing each boundary at the
 The implementation came after all those tests were written. The initial run was all red. Then I implemented `RuleBasedScoringStrategy.calculate_score()`, watched them go green, and moved on to the service layer.
 
 ## When All Tests Pass But the Code is Still Wrong
+
+![N+1 vs Batch: N+1 makes 50 separate DB calls (~121ms), Batch makes 1 call (~4ms)](/images/tdd/03-n1-vs-batch.png)
 
 The `send_overdue_reminders` Celery task dispatches email/Telegram reminders for all overdue invoices. The logic is: find all overdue invoices, look up each invoice's client, determine their risk category (which drives the tone of the reminder), send.
 
@@ -163,6 +169,8 @@ The unit tests were blind to this. They were correct — they verified the right
 pytest-benchmark added the performance dimension to the TDD cycle. I'm not running it in CI on every push — it's slow and environment-dependent — but having the baseline stored and the DB call count tests as regression guards means the correctness and performance properties are both verifiable.
 
 ## Three Layers, Three Different Failures They Catch
+
+![Three testing layers: Unit Tests catch logic errors, Integration Tests catch wiring errors, Benchmarks catch performance regressions](/images/tdd/04-three-layers.png)
 
 Looking back at the test suite for this codebase (~137 test files, 50+ commits from my work alone), the testing ended up organized into three distinct layers, each catching a different failure mode:
 
