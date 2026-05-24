@@ -52,16 +52,17 @@ Branch first, then MR title, then description. The priority order reflects relia
 `sira-mr-bot` is a FastAPI service that listens for GitLab merge request webhook events and translates them into Discord embed cards. It doesn't use `discord.py` — it talks to the Discord webhook API directly over `httpx`, which keeps the dependency surface small.
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '18px', 'nodeSpacing': 50, 'rankSpacing': 60}}}%%
 flowchart TD
-    A([GitLab webhook event]) --> B[Validate X-Gitlab-Token header]
-    B --> C["classify(payload) → Transition\nkind · mr_iid · author · title · branches"]
-    C --> D["extract_ticket(branch, title, description)\n→ SIRA-XXX or None"]
-    D --> E["summarize(title, description)\n→ Gemini 2–4 sentence summary or truncation"]
-    E --> F["build_embed(transition, ticket, summary)\n→ Discord embed object"]
-    F --> G{Redis: msg_id\nexists for this MR?}
-    G -- None --> H[POST new card to Discord]
-    G -- Found --> I[PATCH existing card]
-    I -- HTTP 404\ncard was deleted --> H
+    A([GitLab Webhook]) --> B[Validate Token]
+    B --> C[classify payload\n→ Transition]
+    C --> D[extract_ticket\n→ SIRA-XXX]
+    D --> E[summarize\nGemini / truncate]
+    E --> F[build_embed\n→ Discord embed]
+    F --> G{Redis:\nmsg_id exists?}
+    G -- No --> H[POST new card]
+    G -- Yes --> I[PATCH card]
+    I -- 404 card deleted --> H
     H --> J[(Store msg_id\nin Redis)]
     I --> J
 ```
@@ -150,15 +151,22 @@ The description comes from Gemini — a 2–4 sentence summary of the MR title a
 Before this system existed, finding open MRs to review required a manual GitLab detour. With the bot, that collapses to two steps:
 
 ```mermaid
-flowchart TB
-    subgraph after["After — 2 steps"]
-        direction LR
-        B1[Green card in\n#merge-requests] --> B2[Read Gemini\nsummary inline] --> B3([Click card title\n→ GitLab diff])
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '17px', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart LR
+    subgraph before["Before — 7 steps"]
+        direction TB
+        A1[Open browser] --> A2[Navigate to GitLab]
+        A2 --> A3[Find project]
+        A3 --> A4[Open MR list]
+        A4 --> A5[Filter by Open]
+        A5 --> A6[Scan titles]
+        A6 --> A7([Open & read each MR])
     end
 
-    subgraph before["Before — 7 steps"]
-        direction LR
-        A1[Open browser] --> A2[Navigate\nto GitLab] --> A3[Find\nproject] --> A4[MR\nlist] --> A5[Filter\nOpen] --> A6[Scan\ntitles] --> A7[Open\neach MR] --> A8([Read &\ndecide])
+    subgraph after["After — 2 steps"]
+        direction TB
+        B1[Discord card\nappears] --> B2[Read Gemini\nsummary]
+        B2 --> B3([Click title\n→ diff])
     end
 
     style before fill:#fff3cd,stroke:#ffc107,color:#333
@@ -331,35 +339,35 @@ The ticket closes automatically on merge. Nobody has to remember to update it.
 ## The Full Loop
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '16px'}}}%%
 sequenceDiagram
-    participant Dev as Developer
-    participant Git as GitLab
-    participant Bot as sira-mr-bot
-    participant DC as Discord
-    participant CI as GitLab CI
-    participant LN as Linear
+    participant Dev
+    participant GitLab
+    participant Bot as MR Bot
+    participant Discord
+    participant CI
+    participant Linear
 
-    Dev->>Git: push rifqi/feat/SIRA-341-audit-log-filter
-    Dev->>Git: open MR "SIRA-341 feat(web): audit log filter"
-    Git-->>Bot: webhook action=open
-    Bot->>DC: POST green card + @rifqi ping
-    Bot->>Bot: store msg_id in Redis
+    Dev->>GitLab: push branch (SIRA-341)
+    Dev->>GitLab: open MR
+    GitLab-->>Bot: webhook open
+    Bot->>Discord: POST green card + @ping
+    Bot->>Bot: cache msg_id in Redis
+    GitLab-->>CI: trigger quality stage
+    CI->>Linear: link SIRA-341 to MR
+    CI->>GitLab: post MR comment
 
-    Git-->>CI: trigger quality stage
-    CI->>LN: linear:notify — fetch SIRA-341 title
-    CI->>Git: post MR comment with ticket table
-
-    loop each commit push
-        Dev->>Git: git push
-        Git-->>Bot: webhook action=update
-        Bot->>DC: PATCH existing card (silent, no ping)
+    loop each commit
+        Dev->>GitLab: git push
+        GitLab-->>Bot: webhook update
+        Bot->>Discord: PATCH card (silent)
     end
 
-    Dev->>Git: MR approved → merge to main
-    Git-->>Bot: webhook action=merge
-    Bot->>DC: PATCH card → blue "merged"
-    Git-->>CI: trigger on main push
-    CI->>LN: linear:merged → transition SIRA-341 to Done
+    Dev->>GitLab: merge to main
+    GitLab-->>Bot: webhook merge
+    Bot->>Discord: PATCH card → blue
+    GitLab-->>CI: trigger on main
+    CI->>Linear: SIRA-341 → Done
 ```
 
 ## Before and After the Automation
