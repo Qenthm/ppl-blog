@@ -224,6 +224,45 @@ sonar.coverage.exclusions=\
 
 The exclusions are narrow and intentional. Including them in coverage would inflate the number without measuring anything meaningful. Excluding them means the 85% applies to code that actually has logic to test.
 
+### What SonarQube Actually Caught
+
+SonarQube's `python:S3776` rule flags functions whose cognitive complexity exceeds 15. Two violations from the same sprint show how the gate translates into a concrete fix.
+
+**Commit `3641324b` — `ClientService.update`, complexity 21 → 14:**
+
+```python
+# BEFORE: PII field loop nested inside update(), cognitive complexity 21
+async def update(self, client_id: str, payload: ClientUpdate, ...) -> Client:
+    data: dict[str, Any] = {}
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field in PII_FIELDS:
+            if value is not None:
+                data[field] = self._encryptor.encrypt(str(value))
+            else:
+                data[field] = None
+        else:
+            data[field] = value
+    # ... rest of method continues
+
+# AFTER: loop extracted to _build_update_data(), update() drops to 14
+def _build_update_data(self, payload: ClientUpdate) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field in PII_FIELDS:
+            data[field] = self._encryptor.encrypt(str(value)) if value is not None else None
+        else:
+            data[field] = value
+    return data
+```
+
+The inline loop stacked two levels of conditional branching (is this a PII field? is the value None?) on top of the method's own logic. Extracting it to `_build_update_data` drops `update()` below the threshold and makes the encryption path independently testable.
+
+**Commit `822e8025` — `audit-log.tsx`, five inline functions extracted:**
+
+SonarQube rule S6478 flags functions defined inside a React component body — they're recreated on every render. `audit-log.tsx` had five: `ExpandRowButton`, `FilterChipsBar`, `renderEventTypeBadge`, `formatDateRangeLabel`, and `computeFilterCount` were all closures inside the parent component. Extracting them to module level resolved three rule classes simultaneously — S6478 (inline functions), S3358 (nested ternary inside one), and S3776 (cognitive complexity on the parent).
+
+The side effect was measurable: function coverage on `audit-log.tsx` improved from **63% to 83%**, branch coverage from **85% to 88%**. Smaller, standalone functions are easier to cover in tests. SonarQube didn't flag the coverage gap directly — it was a consequence of the structural fix, not the original signal.
+
 ## React Doctor: Component Health Score
 
 React Doctor is the frontend-specific layer that tsc misses. It checks:
@@ -262,6 +301,23 @@ The tiers are complementary, not redundant:
 | Machine-specific env artifacts | — | ✓ Clean Docker env | — |
 
 The local hook catches things fast (seconds after commit, no remote round-trip). The CI gate verifies in a clean environment. The quality gate enforces thresholds that require full test runs and external API calls — costs that would make the local hook unusable.
+
+## Current Project State
+
+As of the latest main branch analysis on SonarQube:
+
+| Metric | Value |
+|---|---|
+| Coverage (overall) | 96.9% |
+| Bugs | 0 |
+| Vulnerabilities | 0 |
+| Security hotspots | 0 |
+| Technical debt | 51 minutes |
+| Open code smells | 7 |
+
+All 7 open code smells are cognitive complexity violations sitting at 16–17 against a threshold of 15. Two are in my files — `invoice_service.py:238` and `client_service.py:235` — and both need the same extract-helper treatment as commit `3641324b`. Five belong to other contributors.
+
+The quality gate requires **0 new violations** on every MR. Legacy violations from `main` don't block merges — only ones introduced by the branch do. This is the right policy: fixing seven pre-existing smells before merging new features would be a false dependency. They're tracked, visible in the SonarQube project, and will be addressed individually.
 
 ## The Stack at a Glance
 
