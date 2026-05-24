@@ -39,6 +39,23 @@ class PIIEncryptor:
 
 `ClientService.__init__` now reads: `self._pii = PIIEncryptor(encryption_key, PII_FIELDS)`. The product team's actor touches `ClientService`; the security team's actor touches `PIIEncryptor`. They no longer share a file.
 
+```mermaid
+flowchart LR
+    subgraph Before["Before — two actors, one file"]
+        PT1[Product Team] -->|validation\nbulk import\ndedup| CS["ClientService\n354 lines"]
+        ST1[Security Team] -->|encryption algo\nkey handling\nfallback| CS
+        style CS fill:#ffd6d6,stroke:#e74c3c,color:#333
+    end
+
+    subgraph After["After — one actor per file"]
+        PT2[Product Team] -->|validation\nbulk import\ndedup| CS2[ClientService]
+        ST2[Security Team] -->|encryption algo\nkey handling\nfallback| PIE[PIIEncryptor]
+        CS2 -->|uses| PIE
+        style CS2 fill:#d5f5e3,stroke:#27ae60,color:#333
+        style PIE fill:#d5f5e3,stroke:#27ae60,color:#333
+    end
+```
+
 A side effect I didn't plan for: extracting the crypto to its own class made the error handling visible. The old `_decrypt_pii_field` method inside `ClientService` caught both `ValueError` and `InvalidTag` silently — returning the raw value in both cases with no log, no signal. When the crypto moved, I could see the two cases clearly and treat them differently: `WARNING` for `ValueError` (expected legacy plaintext — we know some data was stored unencrypted before the migration), `ERROR` for `InvalidTag` (key mismatch or data corruption — unexpected). Now Sentry has something to fire on, and there's a message worth reading when it does.
 
 The SRP diagnosis — two actors, one file — isn't just structural cleanliness. It's the reason improving the error handling felt like a natural next step once the class existed.
@@ -84,6 +101,32 @@ And it's **LSP in practice**: `@runtime_checkable` means you can assert `isinsta
 
 What's honest to say about LSP here: the guarantee is real, but it hasn't been exercised by an actual substitution yet. Only `RuleBasedScoringStrategy` exists in production. The ML strategy is planned. The protocol is the bet that when it arrives, the service won't need to change — and `@runtime_checkable` is the way to verify that bet before wiring anything up.
 
+```mermaid
+classDiagram
+    class RiskScoringStrategy {
+        <<Protocol>>
+        +str model_version
+        +calculate_score(features) tuple
+    }
+    class RuleBasedScoringStrategy {
+        +str model_version
+        +calculate_score(features) tuple
+    }
+    class MLScoringStrategy {
+        <<planned>>
+        +str model_version
+        +calculate_score(features) tuple
+    }
+    class RiskScoringService {
+        -RiskScoringStrategy _strategy
+        +score_client(client_id)
+    }
+
+    RuleBasedScoringStrategy ..|> RiskScoringStrategy : satisfies structurally
+    MLScoringStrategy ..|> RiskScoringStrategy : satisfies structurally
+    RiskScoringService --> RiskScoringStrategy : depends on protocol only
+```
+
 The three principles in one place is the creative part I want to flag. In inheritance-based languages, OCP, ISP, and LSP are often addressed with separate machinery — abstract base classes for OCP, separate interface types for ISP, explicit override rules for LSP. Python's structural typing via `Protocol` collapses all three into one declaration. The protocol is narrow enough for ISP, checkable enough for LSP, and the injection point in the constructor handles OCP.
 
 ## DIP: ReminderService's hidden dependency
@@ -113,6 +156,22 @@ class ReminderService:
 
 The dependency is declared, typed, and built once. The `ClientService | None` annotation matters: mypy flags any code path that uses `_client_service` without checking for `None` first. That catches exactly the kind of mistake the deferred-import pattern lets through silently.
 
+```mermaid
+flowchart LR
+    subgraph Before["Before — hidden dependency"]
+        RS1[ReminderService] -. "deferred import\ninside _send_telegram\n(invisible to static analysis)" .-> CS1[ClientService]
+        CS1 -. "new instance\nper call" .-> CS1
+        style RS1 fill:#ffd6d6,stroke:#e74c3c,color:#333
+        style CS1 fill:#ffd6d6,stroke:#e74c3c,color:#333
+    end
+
+    subgraph After["After — constructor injection"]
+        RS2["ReminderService\n__init__(db, encryption_key)"] -->|"declared, typed,\nbuilt once"| CS2[ClientService]
+        style RS2 fill:#d5f5e3,stroke:#27ae60,color:#333
+        style CS2 fill:#d5f5e3,stroke:#27ae60,color:#333
+    end
+```
+
 There was also a subtle risk I didn't notice until looking at it carefully: deferred imports suppress circular import errors until runtime. With a top-level import, if `client_service.py` ever imported from `reminder_service.py`, Python would catch the cycle at module load. With a deferred import, you find out in production when `_send_telegram` runs. The fix exposes this risk where it belongs — at startup.
 
 One practical observation: with the deferred pattern, every Telegram send built a new `ClientService`, which after the SRP refactor also built a new `PIIEncryptor`. At fifty reminders in a batch, that's fifty object graphs instantiated and discarded. Constructor injection builds it once. At current scale, this is small. At hundreds of invoices, the N+1 object construction would have become measurable.
@@ -128,6 +187,26 @@ SRP violations are diagnosed by asking whether two independent actors would requ
 Martin is clear about this in *Clean Architecture*: SRP isn't about what a module *does*, it's about who *asks for it to change*. Applying it where there's no conflicting actor is premature structure.
 
 ## What the five principles are actually testing for
+
+```mermaid
+flowchart LR
+    SRP["**SRP**\nWho asks for the change?"]   --> Q1["Two actors in one file\n→ they'll eventually conflict"]
+    OCP["**OCP**\nHow do you add behavior?"]   --> Q2["Modify existing code\n→ break what already works"]
+    ISP["**ISP**\nWhat does your dep carry?"]  --> Q3["Unused interface members\n→ others' changes break you"]
+    LSP["**LSP**\nDo substitutes honor the contract?"] --> Q4["Silent behavior change\n→ abstraction is a lie"]
+    DIP["**DIP**\nWhat do you import?"]        --> Q5["Concretions\n→ coupled to details that drift"]
+
+    style SRP fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style OCP fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style ISP fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style LSP fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style DIP fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    style Q1 fill:#fef9c3,stroke:#ca8a04,color:#422006
+    style Q2 fill:#fef9c3,stroke:#ca8a04,color:#422006
+    style Q3 fill:#fef9c3,stroke:#ca8a04,color:#422006
+    style Q4 fill:#fef9c3,stroke:#ca8a04,color:#422006
+    style Q5 fill:#fef9c3,stroke:#ca8a04,color:#422006
+```
 
 Reading Martin carefully, the SOLID principles aren't primarily about class size or method count. They're about where change originates and how far it propagates.
 

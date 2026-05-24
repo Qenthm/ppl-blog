@@ -11,7 +11,15 @@ I hit that moment twice on the same feature while building SIRA, a FastAPI-based
 
 ## What Red-Green-Refactor Actually Looks Like
 
-![The TDD loop: Write Failing Test → Implement Minimum Code → Clean Up → repeat](/images/tdd/01-rgr-cycle.png)
+```mermaid
+flowchart LR
+    R([Write Failing Test\nRED]) -->|implement minimum code| G([All Tests Pass\nGREEN])
+    G -->|clean up without breaking| F([Clean Up\nREFACTOR])
+    F -->|write next failing test| R
+    style R fill:#ff4d4d,color:#fff,stroke:#cc0000
+    style G fill:#28a745,color:#fff,stroke:#1a7a30
+    style F fill:#0d6efd,color:#fff,stroke:#0a58ca
+```
 
 The risk scoring feature was the first place I applied TDD strictly. The feature computes a weighted score from five client payment behavior metrics, then classifies the result as LOW, MEDIUM, or HIGH risk. Simple enough on paper.
 
@@ -27,7 +35,14 @@ score = delay_score × 0.35
       + invoice_age_score × 0.10
 ```
 
-![Pie chart showing risk score weights: Delay 35%, Overdue Count 20%, Outstanding Amount 20%, Payment Consistency 15%, Invoice Age 10%](/images/tdd/02-weights-pie.png)
+```mermaid
+pie title Risk Score Weights
+    "Delay Score" : 35
+    "Overdue Count" : 20
+    "Outstanding Amount" : 20
+    "Payment Consistency" : 15
+    "Invoice Age" : 10
+```
 
 Writing a test that just passes in a sample input and checks the output would have been fast. But that test wouldn't catch an implementation that got the weights slightly wrong. A delay weight of `0.34` instead of `0.35` would pass a "typical" test case — the score would be slightly off, but you'd need a careful eye to notice.
 
@@ -72,7 +87,28 @@ The implementation came after all those tests were written. The initial run was 
 
 ## When All Tests Pass But the Code is Still Wrong
 
-![N+1 vs Batch: N+1 makes 50 separate DB calls (~121ms), Batch makes 1 call (~4ms)](/images/tdd/03-n1-vs-batch.png)
+```mermaid
+flowchart TB
+    subgraph N1["N+1 Approach — 50 invoices, 50 DB round-trips"]
+        direction LR
+        L[Loop over invoices] --> Q1[get_client\ninvoice 1]
+        L --> Q2[get_client\ninvoice 2]
+        L --> QD[...]
+        L --> Q50[get_client\ninvoice 50]
+    end
+
+    subgraph BA["Batch Approach — 50 invoices, 1 DB round-trip"]
+        direction LR
+        C[Collect all IDs] --> BQ[get_clients\nall 50 IDs at once]
+    end
+
+    N1 -.->|"~121ms at 2ms/call"| X1[ ]
+    BA -.->|"~4ms at 2ms/call"| X2[ ]
+    style N1 fill:#fff3cd,stroke:#ffc107
+    style BA fill:#d1ecf1,stroke:#17a2b8
+    style X1 fill:none,stroke:none
+    style X2 fill:none,stroke:none
+```
 
 The `send_overdue_reminders` Celery task dispatches email/Telegram reminders for all overdue invoices. The logic is: find all overdue invoices, look up each invoice's client, determine their risk category (which drives the tone of the reminder), send.
 
@@ -170,7 +206,34 @@ pytest-benchmark added the performance dimension to the TDD cycle. I'm not runni
 
 ## Three Layers, Three Different Failures They Catch
 
-![Three testing layers: Unit Tests catch logic errors, Integration Tests catch wiring errors, Benchmarks catch performance regressions](/images/tdd/04-three-layers.png)
+```mermaid
+flowchart LR
+    TS([Test Suite]) --> UT
+    TS --> IT
+    TS --> BM
+
+    subgraph UT["Unit Tests"]
+        direction TB
+        U1[Logic errors\nwrong formula, wrong branch]
+        U2["Example: delay weight 0.34 vs 0.35\ncaught instantly"]
+    end
+
+    subgraph IT["Integration Tests"]
+        direction TB
+        I1[Wiring errors\nservice ↔ DB mismatches]
+        I2["Example: audit_log writes\nto wrong table shape"]
+    end
+
+    subgraph BM["Benchmarks"]
+        direction TB
+        B1[Performance regressions\nlogically correct but slow]
+        B2["Example: N+1 query\n121ms vs 4ms"]
+    end
+
+    style UT fill:#d1ecf1,stroke:#17a2b8
+    style IT fill:#d4edda,stroke:#28a745
+    style BM fill:#fff3cd,stroke:#ffc107
+```
 
 Looking back at the test suite for this codebase (~137 test files, 50+ commits from my work alone), the testing ended up organized into three distinct layers, each catching a different failure mode:
 
