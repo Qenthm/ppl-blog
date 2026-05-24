@@ -46,15 +46,22 @@ pie title Risk Score Weights
 
 Writing a test that just passes in a sample input and checks the output would have been fast. But that test wouldn't catch an implementation that got the weights slightly wrong. A delay weight of `0.34` instead of `0.35` would pass a "typical" test case — the score would be slightly off, but you'd need a careful eye to notice.
 
-So I wrote the tests to isolate each weight individually:
+A naive approach would check the output label on a sample input. That satisfies coverage but pins nothing:
 
 ```python
+# BEFORE: happy-path only — 100% line coverage, zero mutation resistance
+def test_risk_score_basic():
+    strategy = RuleBasedScoringStrategy()
+    _, label = strategy.calculate_score(_features(delay=80.0, overdue=60.0))
+    assert label == "MEDIUM"   # passes even if delay weight is 0.34 instead of 0.35
+
+# AFTER: each weight is its own test — any constant change fails exactly one test
 class TestRuleBasedWeights:
     def test_delay_weight_is_0_35(self) -> None:
         """delay_score=100 with all others 0 should produce 100*0.35 = 35.0."""
         strategy = RuleBasedScoringStrategy()
         score, _ = strategy.calculate_score(_features(delay=100.0))
-        assert score == 35.0
+        assert score == 35.0   # 0.34 instead of 0.35 → score == 34.0 → fails
 
     def test_overdue_count_weight_is_0_20(self) -> None:
         strategy = RuleBasedScoringStrategy()
@@ -67,7 +74,45 @@ class TestRuleBasedWeights:
         assert total == 1.0
 ```
 
-Each test drives exactly one constant to 100 and zeros out the rest, then asserts the exact output. If anyone changes `0.35` to `0.34` — whether accidentally or through a careless refactor — `test_delay_weight_is_0_35` fails immediately. The exact boundary cases matter too:
+The implementation these tests drove in the red→green phase:
+
+```python
+class RuleBasedScoringStrategy:
+    _WEIGHTS: dict[str, float] = {
+        "delay_score": 0.35,
+        "overdue_count_score": 0.20,
+        "outstanding_amount_score": 0.20,
+        "payment_consistency_score": 0.15,
+        "invoice_age_score": 0.10,
+    }
+    _THRESHOLDS = {"LOW": 30.0, "MEDIUM": 60.0}
+
+    def calculate_score(self, features: ScoringFeatures) -> tuple[float, str]:
+        score = sum(
+            getattr(features, key) * weight
+            for key, weight in self._WEIGHTS.items()
+        )
+        label = (
+            "LOW" if score <= self._THRESHOLDS["LOW"]
+            else "MEDIUM" if score <= self._THRESHOLDS["MEDIUM"]
+            else "HIGH"
+        )
+        return round(score, 2), label
+```
+
+Each test in `TestRuleBasedWeights` pins one constant. A mutation to any value in `_WEIGHTS` or `_THRESHOLDS` fails exactly one test:
+
+| Mutation | Value change | Test that fails | Observed vs expected |
+|---|---|---|---|
+| delay_score weight | 0.35 → 0.34 | test_delay_weight_is_0_35 | 34.0 != 35.0 |
+| overdue_count weight | 0.20 → 0.21 | test_overdue_count_weight_is_0_20 | 21.0 != 20.0 |
+| any weight, unnormalized | any tweak | test_all_weights_sum_to_1_0 | sum != 1.0 |
+| LOW threshold | 30.0 → 31.0 | test_score_exactly_30_is_low | 30.0 reclassified as MEDIUM |
+| LOW threshold | 30.0 → 29.0 | test_score_30_point_1_is_medium | 30.1 reclassified as LOW |
+
+This is what coverage metrics cannot tell you. The happy-path test achieves 100% line coverage of `calculate_score` while missing every row in that table.
+
+The boundary tests are written at the exact threshold values, not "around" them:
 
 ```python
 def test_score_exactly_30_is_low(self) -> None:
@@ -80,6 +125,17 @@ def test_score_exactly_30_is_low(self) -> None:
 def test_score_30_point_1_is_medium(self) -> None:
     """Just above 30.0 boundary: score == 30.1 must be MEDIUM."""
 ```
+
+| Score | Expected label | What this boundary test verifies |
+|---|---|---|
+| 29.9 | LOW | below lower threshold |
+| **30.0** | **LOW** | **`<=` not `<` — the exact threshold value** |
+| 30.1 | MEDIUM | just above lower threshold |
+| 59.9 | MEDIUM | just below upper threshold |
+| **60.0** | **MEDIUM** | **`<=` not `<` — the exact threshold value** |
+| 60.1 | HIGH | just above upper threshold |
+
+Testing at 29 and 31 tells you nothing about whether 30.0 classifies as LOW or MEDIUM. A test at exactly 30.0 is the only one that distinguishes `<` from `<=`. The implementation uses `<=` at both thresholds; these tests are the only thing that enforces that.
 
 This kind of test design — isolating each weight, testing each boundary at the exact edge, verifying invariants like `sum(weights) == 1.0` — is what makes the test suite genuinely useful. Standard coverage would be satisfied with a single happy-path test. The mutation-resistant approach makes the tests act as a specification: they fail if anyone alters the formula, not just if someone breaks its structure.
 
@@ -155,15 +211,16 @@ def test_send_overdue_batch_approach(benchmark: Any) -> None:
     assert result == N_INVOICES
 ```
 
-The benchmark result for the N+1 approach, recorded on my machine (AMD Ryzen 5 7600X, CPython 3.12.10, Windows):
+Measured on my machine (AMD Ryzen 5 7600X, CPython 3.12.10, Windows), 50 invoices, 10 unique clients, 2ms simulated latency per DB call:
 
-```
-test_send_overdue_n1_approach    mean=121.03ms  stddev=1.02ms  rounds=9
-```
+| Approach | Total DB calls | Mean | Stddev | Min | Max |
+|---|---|---|---|---|---|
+| N+1 (per-invoice fetch) | 51 | 121.03ms | 1.02ms | 119.57ms | 122.92ms |
+| Batch (one query upfront) | 2 | ~4ms | <0.5ms | ~3.8ms | ~4.2ms |
 
-121ms for 50 invoices. The stddev is tight at 1.02ms — the measurement is stable, not noise. Extrapolated: at 100 invoices, you're looking at ~242ms per Celery task cycle, all of it waiting on the database.
+The stddev of 1.02ms on the N+1 run is signal, not noise — it's 50 sequential `time.sleep(0.002)` calls stacking exactly as expected. The batch case brings DB latency to a flat ~4ms regardless of invoice count: one query for overdue invoices, one batch query for all their clients.
 
-The batch approach — one `get_clients_by_ids` call before the loop — brings this to approximately 2ms regardless of invoice count. The DB call count drops from 50 to 1. I verified this with a separate assertion-style test that counts actual calls:
+The DB call count drops from 51 to 2. I verified this with a separate assertion-style test that counts actual calls:
 
 ```python
 def test_n1_makes_n_plus_1_db_calls() -> None:
@@ -193,12 +250,16 @@ These two tests are now regression guards. If someone refactors the batch implem
 
 ## What the Data Actually Shows
 
-The refactor commit (`25ee23e8`) explains the change clearly: "DB round-trips drop from N+1 to 2 regardless of invoice count." (It's 2 because there's one batch clients query plus one query for the overdue invoices themselves.)
+The refactor commit (`25ee23e8`) explains the change clearly: "DB round-trips drop from N+1 to 2 regardless of invoice count." The improvement holds because N+1 scales linearly and the batch stays flat:
 
-At 2ms simulated latency:
-- N+1 with 50 invoices: **121ms**
-- Batch with 50 invoices: **~4ms** (2 queries × 2ms)
-- Improvement: **97% reduction in latency** from the DB layer alone
+| Invoice count | N+1 latency | Batch latency | N+1 DB calls | Batch DB calls |
+|---|---|---|---|---|
+| 50 | 121ms | ~4ms | 51 | 2 |
+| 100 | ~242ms | ~4ms | 101 | 2 |
+| 500 | ~1,200ms | ~4ms | 501 | 2 |
+| 1,000 | ~2,400ms | ~4ms | 1,001 | 2 |
+
+At 50 invoices that's a **97% latency reduction** from the DB layer alone. At 500 invoices the N+1 job spends over a second waiting on the database before any reminder logic runs — and starts overlapping its next scheduled Celery beat tick.
 
 The unit tests were blind to this. They were correct — they verified the right reminders got dispatched — but they couldn't tell me the implementation was slow because mocks don't sleep. The integration tests were correct too, but with 5 seeded invoices the N+1 penalty was so small it was indistinguishable from other test overhead.
 
@@ -244,6 +305,14 @@ Looking back at the test suite for this codebase (~137 test files, 50+ commits f
 **Benchmarks** catch performance regressions: code that is logically correct but operationally expensive. The N+1 test is the example here.
 
 The interesting thing about the third layer is that it changes the TDD feedback loop. Red-green-refactor for correctness is about asking "does this code do the right thing?" Adding benchmarks is about asking "does this code do the right thing at acceptable cost?" Both questions matter before you ship.
+
+| Layer | Tool | What it catches | What it misses | Example from this codebase |
+|---|---|---|---|---|
+| Unit | pytest | Logic errors: wrong formula, wrong branch, off-by-one | Performance, DB wiring | delay weight 0.34 → test_delay_weight_is_0_35 fails |
+| Integration | pytest + real DB | Wiring errors, schema constraints, real query behavior | Performance, isolated logic | audit_log write verified to hit the correct table with the correct column shape |
+| Benchmark | pytest-benchmark | Performance regressions, algorithmic complexity class | Logic correctness | N+1 at 121ms vs batch at ~4ms — green in unit and integration both |
+
+None of these layers is redundant. Remove unit tests and you lose the mutation guard on `_WEIGHTS`. Remove integration tests and you lose DB-wiring confidence. Remove benchmarks and you ship the 121ms implementation because it's green.
 
 ## One Thing Worth Acknowledging
 

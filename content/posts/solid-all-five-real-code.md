@@ -19,9 +19,26 @@ Martin's formulation: *"A module should be responsible to one, and only one, act
 
 Martin's actor framing makes the diagnosis precise. `ClientService` served two distinct stakeholders: the product team (client validation, bulk imports, deduplication logic) and the security team (encryption algorithm, key handling, fallback behavior for legacy plaintext). If a requirement came from either side, both would touch the same file, modifying code the other actor hadn't asked to change.
 
-The fix was an Extract Class refactor that produced `PIIEncryptor`:
+The fix was an Extract Class refactor:
 
 ```python
+# BEFORE: two actors interleaved in one 354-line class
+class ClientService:
+    def create(self, ...):
+        encrypted = encrypt(value, self._key)   # security concern inside a product method
+
+    def update(self, ...):
+        encrypted = encrypt(value, self._key)   # duplicated in every mutating method
+
+    def _decrypt_pii_field(self, value):
+        try:
+            return decrypt(value, self._key)
+        except ValueError:
+            return value   # silent — no log
+        except InvalidTag:
+            return value   # also silent
+
+# AFTER: each actor has its own file
 class PIIEncryptor:
     def __init__(self, key: str, fields: tuple[str, ...]) -> None:
         self._key = key
@@ -35,9 +52,20 @@ class PIIEncryptor:
         for field in self._fields:
             decrypted[field] = self._decrypt_field(row, field)
         return decrypted
+
+class ClientService:
+    def __init__(self, db: Client, encryption_key: str) -> None:
+        self._pii = PIIEncryptor(encryption_key, PII_FIELDS)  # product code never touches crypto
 ```
 
 `ClientService.__init__` now reads: `self._pii = PIIEncryptor(encryption_key, PII_FIELDS)`. The product team's actor touches `ClientService`; the security team's actor touches `PIIEncryptor`. They no longer share a file.
+
+| Metric | Before | After |
+|---|---|---|
+| Files a security-side change touches | 1 — all 354 lines of ClientService to audit | 1 — PIIEncryptor, 38 lines |
+| Files a product-side change touches | 1 — same file (collision risk) | 1 — ClientService only |
+| Crypto call sites | 3 scattered across create, update, _decrypt_pii_field | 1 (PIIEncryptor) |
+| Decryption failures logged | 0 — both error paths returned silently | WARNING (legacy plaintext) or ERROR (key mismatch) |
 
 ```mermaid
 flowchart LR
@@ -69,6 +97,12 @@ Three definitions that matter here. **OCP**: a software artifact should be open 
 Python's `typing.Protocol` offers a different path. Instead of declaring what a strategy class must *inherit*, you declare what it must *do*:
 
 ```python
+# BEFORE: hardcoded — adding an ML model requires modifying RiskScoringService
+class RiskScoringService:
+    def __init__(self, db: Client) -> None:
+        self._strategy = RuleBasedScoringStrategy()  # no injection point, no substitution
+
+# AFTER: Protocol + constructor injection — new strategies plug in, service unchanged
 @runtime_checkable
 class RiskScoringStrategy(Protocol):
     model_version: str
@@ -100,6 +134,12 @@ It's also **ISP in practice**: `RiskScoringStrategy` has exactly two members. An
 And it's **LSP in practice**: `@runtime_checkable` means you can assert `isinstance(strategy, RiskScoringStrategy)` in tests. The contract is explicit and verifiable at runtime. A strategy that claims to implement `calculate_score` but returns a string instead of `tuple[float, Literal["LOW", "MEDIUM", "HIGH"]]` is caught by mypy before it reaches the service. The behavioral contract is encoded in the type signature, not in a docstring that can go stale.
 
 What's honest to say about LSP here: the guarantee is real, but it hasn't been exercised by an actual substitution yet. Only `RuleBasedScoringStrategy` exists in production. The ML strategy is planned. The protocol is the bet that when it arrives, the service won't need to change — and `@runtime_checkable` is the way to verify that bet before wiring anything up.
+
+| Principle | The requirement | How the Protocol design satisfies it |
+|---|---|---|
+| OCP | New behavior added without modifying RiskScoringService | Strategy injected at construction; service depends on the Protocol, never the concrete type |
+| ISP | Implementors not forced to depend on what they don't use | Protocol has exactly 2 members — model_version and calculate_score. No strategy is asked to implement get_summary() or persist_log() |
+| LSP | Substitutes honor the contract of the type they replace | Return type `tuple[float, Literal["LOW", "MEDIUM", "HIGH"]]` enforced by mypy; `@runtime_checkable` enables `isinstance(strategy, RiskScoringStrategy)` assertions in tests |
 
 ```mermaid
 classDiagram
@@ -133,28 +173,38 @@ The three principles in one place is the creative part I want to flag. In inheri
 
 Martin: *"The most flexible systems are those in which source code dependencies refer only to abstractions, not to concretions."* High-level modules (policy) shouldn't import low-level modules (mechanism) directly.
 
-`ReminderService._send_telegram` had a deferred import inside the method body:
-
 ```python
-def _send_telegram(self, invoice):
-    from app.services.client_service import ClientService   # hidden here
-    client_svc = ClientService(self._db, self._key)         # built on every call
-    client = asyncio.run(client_svc.get_client(invoice["client_id"]))
-```
+# BEFORE: deferred import — high-level module reaches into the method body to create a concretion
+class ReminderService:
+    def __init__(self, db, encryption_key):
+        self._db = db
+        self._key = encryption_key
+        # two dependencies declared. ClientService is not one of them. That's the lie.
 
-This violates DIP in two ways. First, `ReminderService` (high-level orchestration) directly instantiates `ClientService` (lower-level mechanism) inside a method. The high-level module reaches down and creates the concretion. Second: the deferred import hides this dependency from static analysis. Any tool building a dependency graph by reading `__init__` sees `db` and `encryption_key`. It doesn't see `ClientService`.
+    def _send_telegram(self, invoice):
+        from app.services.client_service import ClientService   # hidden dependency
+        client_svc = ClientService(self._db, self._key)         # new instance on every call
+        client = asyncio.run(client_svc.get_client(invoice["client_id"]))
 
-The fix was constructor injection:
+# AFTER: constructor injection — dependency declared, typed, visible to static analysis
+from app.services.client_service import ClientService  # top-level import, visible immediately
 
-```python
 class ReminderService:
     def __init__(self, db, encryption_key):
         self._client_service: ClientService | None = (
             ClientService(db, encryption_key) if encryption_key else None
         )
+
+    def _send_telegram(self, invoice):
+        if not self._client_service:
+            logger.error("Cannot send Telegram: ClientService not initialized")
+            return "FAILED"
+        client = asyncio.run(self._client_service.get_client(invoice["client_id"]))
 ```
 
-The dependency is declared, typed, and built once. The `ClientService | None` annotation matters: mypy flags any code path that uses `_client_service` without checking for `None` first. That catches exactly the kind of mistake the deferred-import pattern lets through silently.
+This violates DIP in two ways. First, `ReminderService` (high-level orchestration) directly instantiates `ClientService` (lower-level mechanism) inside a method. The high-level module reaches down and creates the concretion. Second: the deferred import hides this dependency from static analysis. Any tool building a dependency graph by reading `__init__` sees `db` and `encryption_key`. It doesn't see `ClientService`.
+
+The dependency is now declared, typed, and built once. The `ClientService | None` annotation matters: mypy flags any code path that uses `_client_service` without checking for `None` first. That catches exactly the kind of mistake the deferred-import pattern lets through silently.
 
 ```mermaid
 flowchart LR
@@ -175,6 +225,14 @@ flowchart LR
 There was also a subtle risk I didn't notice until looking at it carefully: deferred imports suppress circular import errors until runtime. With a top-level import, if `client_service.py` ever imported from `reminder_service.py`, Python would catch the cycle at module load. With a deferred import, you find out in production when `_send_telegram` runs. The fix exposes this risk where it belongs — at startup.
 
 One practical observation: with the deferred pattern, every Telegram send built a new `ClientService`, which after the SRP refactor also built a new `PIIEncryptor`. At fifty reminders in a batch, that's fifty object graphs instantiated and discarded. Constructor injection builds it once. At current scale, this is small. At hundreds of invoices, the N+1 object construction would have become measurable.
+
+| Property | Before (deferred import) | After (constructor injection) |
+|---|---|---|
+| ClientService visible in __init__ | No — hidden in method body | Yes — typed attribute declared in __init__ |
+| Static analyzer sees the dependency | No — missed by mypy, pyright | Yes — traced from __init__ signature |
+| Circular import detection | Deferred — found in production at first call | At module load — found at startup |
+| ClientService constructions per batch | N (one per invoice) | 1 (one per job run) |
+| None-path checked by type checker | N/A | Yes — ClientService \| None forces explicit guard before use |
 
 ## Where I deliberately didn't apply it
 
@@ -215,5 +273,13 @@ SRP says: when two independent change sources live in the same artifact, they'll
 Each one is a question about *coupling* — different in kind, but all pointing at the same failure mode: a change in one part of the system propagating unexpectedly to another.
 
 The SRP refactor on `ClientService` meant a future encryption-algorithm change would touch `PIIEncryptor` only. The OCP design in `RiskScoringService` means swapping in an ML model won't touch the service that orchestrates scoring. The DIP fix in `ReminderService` means its dependency graph is visible, testable, and honest about what it needs.
+
+| Principle | Applied to | Refactoring move | Verifiable outcome |
+|---|---|---|---|
+| SRP | ClientService | Extract Class → PIIEncryptor | Security changes: 38 lines. Product changes: no crypto code to read. |
+| OCP | RiskScoringService | Protocol + constructor injection | ML strategy plugs in without changing the service |
+| ISP | RiskScoringStrategy | Protocol with exactly 2 members | No implementor is forced to define unused methods |
+| LSP | RiskScoringStrategy | @runtime_checkable + return type annotation | mypy enforces the contract; isinstance() verifiable in tests |
+| DIP | ReminderService | Constructor injection | Dependency visible to static analysis; circular import caught at startup |
 
 Three services. Five principles. One sprint. The LSP bet is unverified by a real substitution yet, and the job's SRP was deliberately left alone. But I can point to code that got measurably better from applying each principle that was applied — which is, in the end, the only evidence worth presenting.
