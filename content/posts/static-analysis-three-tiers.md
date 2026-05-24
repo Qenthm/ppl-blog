@@ -1,5 +1,5 @@
 ---
-title: 'Static Analysis Isn't Optional: How We Built a Three-Tier Quality Gate for SIRA'
+title: "Static Analysis Isn't Optional: How We Built a Three-Tier Quality Gate for SIRA"
 date: 2026-05-25
 draft: false
 tags: ['static-analysis', 'python', 'typescript', 'ci-cd', 'code-quality']
