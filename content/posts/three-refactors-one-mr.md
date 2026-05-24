@@ -21,9 +21,8 @@ The service is part of an invoice-reminder SaaS. There's a class that manages cl
 
 **The design pattern that emerges: Facade.** Once you extract the crypto logic into `PIIEncryptor`, what you get is a Facade — a class that presents a clean, domain-specific interface over a lower-level subsystem. The raw `encrypt(value, key)` and `decrypt(value, key)` primitives are the subsystem. `PIIEncryptor.encrypt_field()` and `PIIEncryptor.decrypt_row()` are the facade: callers speak in terms of fields and rows, not raw bytes and cipher keys. The crypto library is an implementation detail that nothing outside `PIIEncryptor` needs to know about.
 
-Before, the crypto was sprinkled across three methods:
-
 ```python
+# BEFORE: crypto scattered across three ClientService methods, silent on failure
 class ClientService:
     def create(self, ...):
         encrypted = encrypt(value, self._key)  # inline in three different methods
@@ -38,11 +37,8 @@ class ClientService:
             return value      # legacy plaintext fallback — silent, no log
         except InvalidTag:
             return value      # key-rotation fallback — also silent
-```
 
-After applying Extract Class, the crypto logic lives in `PIIEncryptor`:
-
-```python
+# AFTER: Extract Class — PIIEncryptor owns all crypto, ClientService delegates
 class PIIEncryptor:
     """Single responsibility: encrypt and decrypt PII fields."""
 
@@ -99,9 +95,8 @@ The old handlers also sat inside a class that nominally knows nothing about encr
 
 **The design pattern: Dependency Injection — Constructor Injection variant.** Pass dependencies into the class through `__init__` rather than letting the class build them itself. The dependency is now visible in the constructor signature: callers know exactly what's required, static analyzers can trace it, and tests can swap it without monkeypatching internals.
 
-`ReminderService` had this problem:
-
 ```python
+# BEFORE: Service Locator — hidden dependency, ClientService rebuilt on every call
 class ReminderService:
     def __init__(self, db, encryption_key):
         self._db = db
@@ -112,18 +107,8 @@ class ReminderService:
         from app.services.client_service import ClientService   # hidden dependency
         client_svc = ClientService(self._db, self._key)         # built on every call
         client = asyncio.run(client_svc.get_client(invoice["client_id"]))
-```
 
-The `__init__` signature is a contract: "to use this class, give me a `db` and an `encryption_key`." But the class secretly also needs `ClientService`. That dependency only materializes at the moment `_send_telegram` runs, which means:
-
-- A static analyzer (mypy, pyright) tracing `ReminderService`'s dependencies by reading `__init__` will miss it entirely.
-- A reviewer writing a new test for `ReminderService` has to discover the hidden dep by running the code or reading every method.
-- Deferred imports suppress circular import errors until runtime — if `client_service.py` ever imported from `reminder_service.py`, Python would catch the cycle at module load time with a top-level import. With a deferred import, you find out in production.
-- Every Telegram message constructs a brand-new `ClientService`, which after Case 1 also builds its own `PIIEncryptor`. A batch of fifty reminders builds and discards that object graph fifty times.
-
-Applying Constructor Injection:
-
-```python
+# AFTER: Constructor Injection — all dependencies declared in __init__, type-annotated
 from app.services.client_service import ClientService  # declared at module level
 
 class ReminderService:
@@ -139,6 +124,13 @@ class ReminderService:
             return "FAILED"
         client = asyncio.run(self._client_service.get_client(invoice["client_id"]))
 ```
+
+The `__init__` signature is a contract: "to use this class, give me a `db` and an `encryption_key`." But the class secretly also needs `ClientService`. That dependency only materializes at the moment `_send_telegram` runs, which means:
+
+- A static analyzer (mypy, pyright) tracing `ReminderService`'s dependencies by reading `__init__` will miss it entirely.
+- A reviewer writing a new test for `ReminderService` has to discover the hidden dep by running the code or reading every method.
+- Deferred imports suppress circular import errors until runtime — if `client_service.py` ever imported from `reminder_service.py`, Python would catch the cycle at module load time with a top-level import. With a deferred import, you find out in production.
+- Every Telegram message constructs a brand-new `ClientService`, which after Case 1 also builds its own `PIIEncryptor`. A batch of fifty reminders builds and discards that object graph fifty times.
 
 The `ClientService | None` type annotation matters. The `if encryption_key` guard means `_client_service` can be `None` in test environments. Mypy and pyright will both flag any code path that uses `_client_service` without checking for `None` first — catching exactly the kind of mistake that a deferred-import pattern lets slip through silently.
 
