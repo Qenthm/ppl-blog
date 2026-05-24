@@ -51,23 +51,19 @@ Branch first, then MR title, then description. The priority order reflects relia
 
 `sira-mr-bot` is a FastAPI service that listens for GitLab merge request webhook events and translates them into Discord embed cards. It doesn't use `discord.py` — it talks to the Discord webhook API directly over `httpx`, which keeps the dependency surface small.
 
-```
-GitLab event
-    ↓
-POST /gitlab-webhook (validated via X-Gitlab-Token header)
-    ↓
-classify(payload) → Transition (kind, mr_iid, author, title, branches)
-    ↓
-extract_ticket(branch, title, description) → "SIRA-186" or None
-    ↓
-summarize(title, description) → 2–4 sentence summary (Gemini or truncation)
-    ↓
-build_embed(transition, ticket, summary) → Discord embed object
-    ↓
-Redis check: existing message ID for this MR?
-    ├─→ None: POST new card → store message ID
-    ├─→ Found: PATCH existing card → update message ID if changed
-    └─→ PATCH returns 404: card was deleted → repost, update stored ID
+```mermaid
+flowchart TD
+    A([GitLab webhook event]) --> B[Validate X-Gitlab-Token header]
+    B --> C["classify(payload) → Transition\nkind · mr_iid · author · title · branches"]
+    C --> D["extract_ticket(branch, title, description)\n→ SIRA-XXX or None"]
+    D --> E["summarize(title, description)\n→ Gemini 2–4 sentence summary or truncation"]
+    E --> F["build_embed(transition, ticket, summary)\n→ Discord embed object"]
+    F --> G{Redis: msg_id\nexists for this MR?}
+    G -- None --> H[POST new card to Discord]
+    G -- Found --> I[PATCH existing card]
+    I -- HTTP 404\ncard was deleted --> H
+    H --> J[(Store msg_id\nin Redis)]
+    I --> J
 ```
 
 The Redis state keeps the bot idempotent. Every MR has at most one Discord card. Status updates edit the existing card rather than posting new messages. A channel with 10 active MRs has 10 cards, not 10 × (number-of-commits) messages.
@@ -151,22 +147,22 @@ The description comes from Gemini — a 2–4 sentence summary of the MR title a
 
 ## The Reviewer Experience
 
-Before this system existed, finding open MRs to review required a manual GitLab detour:
+Before this system existed, finding open MRs to review required a manual GitLab detour. With the bot, that collapses to two steps:
 
-```
-Open browser → navigate to GitLab → find the project → Merge Requests tab
-→ filter by Open → scan titles → open each one → read the description
-→ decide if it's yours to review → context-switch back to work
-```
+```mermaid
+flowchart TB
+    subgraph after["After — 2 steps"]
+        direction LR
+        B1[Green card in\n#merge-requests] --> B2[Read Gemini\nsummary inline] --> B3([Click card title\n→ GitLab diff])
+    end
 
-That's seven steps before you even look at a diff. For a team actively merging across multiple features in parallel, it's a context-switch tax that compounds across every sprint.
+    subgraph before["Before — 7 steps"]
+        direction LR
+        A1[Open browser] --> A2[Navigate\nto GitLab] --> A3[Find\nproject] --> A4[MR\nlist] --> A5[Filter\nOpen] --> A6[Scan\ntitles] --> A7[Open\neach MR] --> A8([Read &\ndecide])
+    end
 
-With the bot, the flow for a reviewer is:
-
-```
-See green card appear in #merge-requests Discord channel
-→ read the 3-sentence summary inline
-→ click the card title → lands directly on the GitLab MR diff
+    style before fill:#fff3cd,stroke:#ffc107,color:#333
+    style after fill:#d1ecf1,stroke:#17a2b8,color:#333
 ```
 
 The card title is the `url` field in the Discord embed — it renders as a hyperlink directly to `$CI_PROJECT_URL/-/merge_requests/$MR_IID`. One click from Discord to the diff, no navigation required.
@@ -334,28 +330,36 @@ The ticket closes automatically on merge. Nobody has to remember to update it.
 
 ## The Full Loop
 
-```
-Developer creates branch: rifqi/feat/SIRA-341-audit-log-filter
-        ↓
-Opens MR: "SIRA-341 feat(web): audit log filter and search"
-        ↓
-GitLab webhook fires → sira-mr-bot
-    • Extracts SIRA-341 from branch name
-    • Gemini generates 3-sentence summary
-    • Posts green Discord card, pings rifqi
-    • Stores msg_id in Redis
-        ↓
-CI quality stage: linear:notify job
-    • Queries Linear for SIRA-341 title
-    • Posts table comment on MR linking SIRA-341
-        ↓
-Developer pushes more commits
-    • Each push: sira-mr-bot PATCHes the existing Discord card (silent)
-    • Redis keeps the msg_id stable across pushes
-        ↓
-MR is approved and merged to main
-    • sira-mr-bot: PATCHes card to BLUE "merged" (no ping)
-    • linear:merged CI job: transitions SIRA-341 → Done in Linear
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant Git as GitLab
+    participant Bot as sira-mr-bot
+    participant DC as Discord
+    participant CI as GitLab CI
+    participant LN as Linear
+
+    Dev->>Git: push rifqi/feat/SIRA-341-audit-log-filter
+    Dev->>Git: open MR "SIRA-341 feat(web): audit log filter"
+    Git-->>Bot: webhook action=open
+    Bot->>DC: POST green card + @rifqi ping
+    Bot->>Bot: store msg_id in Redis
+
+    Git-->>CI: trigger quality stage
+    CI->>LN: linear:notify — fetch SIRA-341 title
+    CI->>Git: post MR comment with ticket table
+
+    loop each commit push
+        Dev->>Git: git push
+        Git-->>Bot: webhook action=update
+        Bot->>DC: PATCH existing card (silent, no ping)
+    end
+
+    Dev->>Git: MR approved → merge to main
+    Git-->>Bot: webhook action=merge
+    Bot->>DC: PATCH card → blue "merged"
+    Git-->>CI: trigger on main push
+    CI->>LN: linear:merged → transition SIRA-341 to Done
 ```
 
 ## Before and After the Automation
