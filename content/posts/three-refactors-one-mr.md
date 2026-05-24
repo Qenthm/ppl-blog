@@ -89,6 +89,16 @@ The old handlers also sat inside a class that nominally knows nothing about encr
 
 **Result.** The SRP violation meant that a future encryption algorithm change (say, AES-GCM → ChaCha20) would require hunting through 354 lines of `ClientService` across three methods. After the refactor, you touch `PIIEncryptor` only — 38 lines, one class, one reason to be there. `ClientService` doesn't change at all. The 42 existing tests stayed green; `PIIEncryptor` is now independently testable without standing up the whole client service.
 
+| Metric | Before | After |
+|---|---|---|
+| Crypto code locations | 3 (scattered across create, update, _decrypt_pii_field) | 1 (PIIEncryptor) |
+| Lines to read for any crypto change | 354 (all of ClientService) | 38 (PIIEncryptor only) |
+| Lines per call site | 2–4 (inline per method) | 1 (self._pii.encrypt_field / decrypt_row) |
+| Decryption failures logged | 0 — silent fallback in both error cases | 1 WARNING (plaintext) or ERROR (key mismatch) |
+| Classes that know the encryption key | 2 (ClientService + any class that passed it) | 1 (PIIEncryptor only) |
+
+The observability row is the one that matters most in production. Silent fallbacks mean a key-rotation failure looks identical to a successful decrypt until a customer complains about garbled data. Now Sentry catches it before anyone notices.
+
 ## Case 2 — Dependency Injection pattern (replacing Service Locator)
 
 **The anti-pattern: Service Locator.** A class that reaches out and constructs (or fetches) its own dependencies internally is using the Service Locator anti-pattern. It works at runtime, but it hides what the class actually needs from anything that reads the code statically.
@@ -147,6 +157,15 @@ def test_send_telegram_success(self, mock_get_client):
 A class-method patch replaces the method on the class itself, not on a specific instance. It applies whether the instance was built in `__init__` or inside the method body. The structure moved; the behavior didn't; the tests couldn't tell the difference.
 
 Structural win: `ReminderService` now builds one `ClientService` for its lifetime. Any engineer reading `__init__` sees the full dependency list immediately.
+
+| Invoices in batch | ClientService constructions (before) | ClientService constructions (after) |
+|---|---|---|
+| 1 | 1 | 1 |
+| 50 | 50 | 1 |
+| 200 | 200 | 1 |
+| 1,000 | 1,000 | 1 |
+
+After Case 1, each `ClientService` construction also builds a `PIIEncryptor` and loads the encryption key. The Service Locator pattern was constructing and discarding that full object graph once per Telegram message. Constructor injection reduces it to once per job run, regardless of batch size. Not the bottleneck — the N+1 in Case 3 was — but it's wasted allocation that compounds with scale.
 
 ## Case 3 — Repository pattern (batch-fetch) eliminating N+1
 
