@@ -3,6 +3,7 @@ title: "Static Analysis Isn't Optional: How We Built a Three-Tier Quality Gate f
 date: 2026-05-25
 draft: false
 tags: ['static-analysis', 'python', 'typescript', 'ci-cd', 'code-quality']
+aliases: ['/posts/qa-beyond-sonarqube/']
 ---
 
 There's a version of static analysis that doesn't work: you add a linter to CI, it flags style issues nobody fixes, the team learns to ignore the yellow warnings, and the tool becomes decoration. The failures it was supposed to catch go to production anyway.

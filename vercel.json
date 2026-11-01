@@ -1,5 +1,5 @@
 {
-  "buildCommand": "hugo --minify --buildFuture",
+  "buildCommand": "hugo --minify --buildFuture --cleanDestinationDir",
   "outputDirectory": "public",
   "build": {
     "env": {
