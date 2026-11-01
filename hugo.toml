@@ -1,4 +1,4 @@
-baseURL = 'https://ppl-blog-qenthms-projects.vercel.app/'
+baseURL = 'https://rifqi-blog.vercel.app/'
 locale = 'en-us'
 title = 'ppl-blog'
 theme = 'PaperMod'

@@ -16,7 +16,7 @@ Posts here serve as evidence for PPL individual review competences (M1–M6 mand
 
 - Static site generator: Hugo 0.161.1 (Extended)
 - Theme: PaperMod (git submodule at `themes/PaperMod`)
-- Hosting: Vercel — https://ppl-blog-qenthms-projects.vercel.app
+- Hosting: Vercel — https://rifqi-blog.vercel.app (old URL https://ppl-blog-qenthms-projects.vercel.app still works)
 - Repo: https://github.com/Qenthm/ppl-blog
 
 ## Key commands
